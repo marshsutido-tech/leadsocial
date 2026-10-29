@@ -8,10 +8,21 @@ const { createApp } = require('../src/server');
 process.env.META_VERIFY_TOKEN = 'verif';
 process.env.META_APP_SECRET = 'appsecret';
 
-let server, base, repo;
+let server, base, repo, app;
+const sent = [];
+const messenger = {
+  igDm: async (b, to, text) => sent.push({ type: 'igDm', to, text }),
+  igPrivateReply: async (b, commentId, text) => sent.push({ type: 'igPrivateReply', to: commentId, text }),
+  igCommentReply: async (b, commentId, text) => sent.push({ type: 'igCommentReply', to: commentId, text }),
+  waText: async (b, to, text) => {
+    if (!b.wa_access_token) throw new Error('Falta el token de WhatsApp');
+    sent.push({ type: 'waText', to, text });
+  },
+};
+const ai = { reply: async ({ conversation }) => `IA responde a: ${conversation.at(-1).text}` };
 
 test.before(async () => {
-  const app = await createApp({ db: openDb(':memory:'), secret: 'test' });
+  app = await createApp({ db: openDb(':memory:'), secret: 'test', messenger, ai });
   repo = app.locals.repo;
   await new Promise((r) => { server = app.listen(0, r); });
   base = `http://127.0.0.1:${server.address().port}`;
@@ -25,11 +36,17 @@ const post = (path, body, cookie) => fetch(base + path, {
   body: form(body),
 });
 const get = (path, cookie) => fetch(base + path, { redirect: 'manual', headers: cookie ? { cookie } : {} });
-const signed = (body) => {
+const signed = async (body) => {
   const raw = JSON.stringify(body);
   const sig = 'sha256=' + crypto.createHmac('sha256', 'appsecret').update(raw).digest('hex');
-  return fetch(base + '/webhooks/meta', { method: 'POST', headers: { 'content-type': 'application/json', 'x-hub-signature-256': sig }, body: raw });
+  const res = await fetch(base + '/webhooks/meta', { method: 'POST', headers: { 'content-type': 'application/json', 'x-hub-signature-256': sig }, body: raw });
+  await app.locals.drainWebhooks();
+  return res;
 };
+const waMsg = (from, text, name = 'Cliente') => signed({ object: 'whatsapp_business_account', entry: [{ changes: [{ value: {
+  metadata: { phone_number_id: 'WA1' }, contacts: [{ wa_id: from, profile: { name } }],
+  messages: [{ from, type: 'text', text: { body: text } }],
+} }] }] });
 
 let cookie, biz;
 
@@ -92,7 +109,7 @@ test('webhook de Meta: verificación, firma, DMs, comentarios y WhatsApp', async
   assert.equal(unsigned.status, 401);
 
   await signed({ object: 'instagram', entry: [{ id: 'IG1', messaging: [{ sender: { id: 'U9' }, message: { text: 'Hola!' } }], changes: [
-    { field: 'comments', value: { from: { id: 'U7', username: 'lucia' }, text: '¿Precio?' } },
+    { field: 'comments', value: { id: 'C1', from: { id: 'U7', username: 'lucia' }, text: '¿Precio?' } },
     { field: 'comments', value: { from: { id: 'U8', username: 'pepe' }, text: 'Qué bonito' } },
   ] }] });
   await signed({ object: 'instagram', entry: [{ id: 'IG1', messaging: [{ sender: { id: 'U9' }, message: { text: 'Sigo aquí' } }] }] });
@@ -116,4 +133,69 @@ test('exporta CSV sin inyección de fórmulas', async () => {
   const csv = await res.text();
   assert.match(res.headers.get('content-type'), /text\/csv/);
   assert.match(csv, /"'=HYPERLINK\(""x""\)"/);
+});
+
+test('comentario con palabra clave: DM privado y respuesta pública', async () => {
+  const dm = sent.find((m) => m.type === 'igPrivateReply');
+  assert.ok(dm, 'se envió DM privado al comentar «¿Precio?»');
+  assert.match(dm.text, /\/c\/panaderia-oscar\?src=instagram&campaign=bot/);
+  assert.ok(sent.some((m) => m.type === 'igCommentReply'));
+  assert.ok(sent.some((m) => m.type === 'igDm' && /Gracias por escribir a Panadería Óscar/.test(m.text)), 'bienvenida por DM');
+});
+
+test('WhatsApp sin token registra el error en la ficha', async () => {
+  const [wa] = await repo.listLeads(biz.id, { source: 'whatsapp' });
+  const acts = await repo.activities(wa.id);
+  assert.ok(acts.some((a) => a.kind === 'error' && /token/.test(a.text)));
+});
+
+test('WhatsApp: bienvenida, preguntas de cualificación y cierre', async () => {
+  await post('/panel/automatizacion/meta', { ig_account_id: 'IG1', wa_phone_number_id: 'WA1', wa_access_token: 'tok' }, cookie);
+  await post('/panel/automatizacion/bot', { bot_questions: '¿Qué buscas?\n¿Para cuándo?', bot_closing: 'Gracias{nombre}, te escribimos pronto.' }, cookie);
+  sent.length = 0;
+  await waMsg('34600999888', 'Hola', 'Rosa');
+  assert.deepEqual(sent.map((m) => m.text), ['¡Hola Rosa! Gracias por escribir a Panadería Óscar. ¿En qué te podemos ayudar?', '¿Qué buscas?']);
+  await waMsg('34600999888', 'Una tarta');
+  await waMsg('34600999888', 'El sábado');
+  assert.deepEqual(sent.slice(2).map((m) => m.text), ['¿Para cuándo?', 'Gracias Rosa, te escribimos pronto.']);
+  const lead = (await repo.listLeads(biz.id, { search: 'Rosa' }))[0];
+  const answers = (await repo.activities(lead.id)).filter((a) => a.kind === 'respuesta').map((a) => a.text);
+  assert.deepEqual(answers.reverse(), ['¿Qué buscas? → Una tarta', '¿Para cuándo? → El sábado']);
+});
+
+test('IA responde cuando ninguna regla encaja, solo si está activada', async () => {
+  sent.length = 0;
+  await waMsg('34600999888', '¿Abrís el domingo?');
+  assert.equal(sent.length, 0, 'IA desactivada: no responde');
+  await post('/panel/automatizacion/bot', { bot_questions: '', bot_closing: 'x', ai_enabled: '1', ai_info: 'Abrimos L-S' }, cookie);
+  await waMsg('34600999888', '¿Y festivos?');
+  assert.deepEqual(sent.map((m) => m.text), ['IA responde a: ¿Y festivos?']);
+});
+
+test('reglas: crear, pausar y palabra clave en WhatsApp', async () => {
+  await post('/panel/automatizacion/reglas', { channel: 'whatsapp', keywords: 'horario', reply: 'Abrimos de 9 a 20h' }, cookie);
+  sent.length = 0;
+  await waMsg('34600999888', '¿Qué horario tenéis?');
+  assert.deepEqual(sent.map((m) => m.text), ['Abrimos de 9 a 20h']);
+  const rule = (await repo.listAutomations(biz.id)).find((r) => r.keywords === 'horario');
+  assert.equal(rule.hits, 1);
+  await post(`/panel/automatizacion/reglas/${rule.id}/activar`, {}, cookie);
+  sent.length = 0;
+  await waMsg('34600999888', 'horario?');
+  assert.deepEqual(sent.map((m) => m.text), ['IA responde a: horario?'], 'regla pausada: contesta la IA');
+});
+
+test('simulador conversa sin enviar nada ni contar como lead', async () => {
+  const before = (await repo.listLeads(biz.id)).length;
+  sent.length = 0;
+  await post('/panel/simulador', { canal: 'ig_dm', text: 'Hola, ¿precio?' }, cookie);
+  const page = await (await get('/panel/simulador?canal=ig_dm', cookie)).text();
+  assert.match(page, /Gracias por escribir a Panadería Óscar/);
+  const comment = await (await post('/panel/simulador', { canal: 'ig_comment', text: 'info porfa' }, cookie)).text();
+  assert.match(comment, /DM privado automático/);
+  assert.equal(sent.length, 0);
+  assert.equal((await repo.listLeads(biz.id)).length, before);
+  await post('/panel/simulador/reiniciar', { canal: 'ig_dm' }, cookie);
+  assert.equal(await repo.simLead(biz.id, 'ig_dm'), undefined);
+  assert.equal((await get('/panel/automatizacion', cookie)).status, 200);
 });

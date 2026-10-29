@@ -61,7 +61,42 @@ const SCHEMA = `
     campaign TEXT DEFAULT '',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS automations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL,
+    keywords TEXT NOT NULL DEFAULT '',
+    reply TEXT NOT NULL,
+    public_reply TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1,
+    hits INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `;
+
+// Columnas añadidas después de la primera versión (se crean si faltan).
+const ADDED_COLUMNS = [
+  ['businesses', 'ig_access_token', "TEXT DEFAULT ''"],
+  ['businesses', 'wa_access_token', "TEXT DEFAULT ''"],
+  ['businesses', 'bot_questions', "TEXT DEFAULT ''"],
+  ['businesses', 'bot_closing', "TEXT DEFAULT '¡Gracias! Ya tenemos todo lo necesario. En breve te escribe una persona del equipo.'"],
+  ['businesses', 'ai_enabled', 'INTEGER DEFAULT 0'],
+  ['businesses', 'ai_info', "TEXT DEFAULT ''"],
+  ['leads', 'bot_step', 'INTEGER DEFAULT 0'],
+];
+
+const CHANNELS = ['ig_comment', 'ig_dm', 'whatsapp'];
+
+// Reglas que se crean al registrarse, para que el bot funcione desde el primer día.
+const DEFAULT_AUTOMATIONS = [
+  { channel: 'ig_comment', keywords: 'precio,info,quiero', reply: '¡Hola{nombre}! Te paso toda la info por aquí 👉 {enlace}', public_reply: '¡Te hemos enviado un mensaje privado! 📩' },
+  { channel: 'ig_dm', keywords: '', reply: '¡Hola{nombre}! Gracias por escribir a {comercio}. ¿En qué te podemos ayudar?' },
+  { channel: 'whatsapp', keywords: '', reply: '¡Hola{nombre}! Gracias por escribir a {comercio}. ¿En qué te podemos ayudar?' },
+];
+
+// Leads creados desde el simulador del panel: no cuentan en listas ni métricas.
+const REAL = "(external_id IS NULL OR external_id NOT LIKE 'sim:%')";
 
 /**
  * Abre la base de datos.
@@ -83,6 +118,10 @@ function openDb(url) {
 
 async function migrate(db) {
   await db.executeMultiple(SCHEMA);
+  for (const [table, column, def] of ADDED_COLUMNS) {
+    const cols = (await db.execute(`PRAGMA table_info(${table})`)).rows.map((r) => r.name);
+    if (!cols.includes(column)) await db.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+  }
 }
 
 function normalizeSource(s) {
@@ -119,6 +158,30 @@ function repo(db) {
         f.name, f.headline, f.offer, f.whatsapp, f.instagram, f.tiktok,
         f.wa_template, f.keywords, f.ig_account_id, f.wa_phone_number_id, id);
     },
+    async updateBot(id, f) {
+      await run('UPDATE businesses SET bot_questions=?, bot_closing=?, ai_enabled=?, ai_info=? WHERE id=?',
+        f.bot_questions, f.bot_closing, f.ai_enabled ? 1 : 0, f.ai_info, id);
+    },
+    /** Solo guarda los tokens que vienen rellenos (dejar el campo vacío conserva el anterior). */
+    async updateTokens(id, { ig_access_token, wa_access_token }) {
+      if (ig_access_token) await run('UPDATE businesses SET ig_access_token=? WHERE id=?', ig_access_token, id);
+      if (wa_access_token) await run('UPDATE businesses SET wa_access_token=? WHERE id=?', wa_access_token, id);
+    },
+
+    // --- automatizaciones ---
+    listAutomations: (businessId) => all('SELECT * FROM automations WHERE business_id=? ORDER BY channel, id', businessId),
+    async createAutomation(businessId, a) {
+      if (!CHANNELS.includes(a.channel) || !a.reply) return;
+      await run('INSERT INTO automations (business_id, channel, keywords, reply, public_reply) VALUES (?, ?, ?, ?, ?)',
+        businessId, a.channel, a.keywords || '', a.reply, a.public_reply || '');
+    },
+    async createDefaultAutomations(businessId) {
+      for (const a of DEFAULT_AUTOMATIONS) await this.createAutomation(businessId, a);
+    },
+    toggleAutomation: (businessId, id) =>
+      run('UPDATE automations SET active = 1 - active WHERE business_id=? AND id=?', businessId, id),
+    deleteAutomation: (businessId, id) => run('DELETE FROM automations WHERE business_id=? AND id=?', businessId, id),
+    countAutomationHit: (id) => run('UPDATE automations SET hits = hits + 1 WHERE id=?', id),
 
     // --- leads ---
     /** Crea un lead. Si trae external_id y ya existe, registra actividad y devuelve el existente. */
@@ -142,7 +205,7 @@ function repo(db) {
       return { id, created: true };
     },
     listLeads(businessId, { status, source, search } = {}) {
-      const where = ['business_id = ?'];
+      const where = ['business_id = ?', REAL];
       const args = [businessId];
       if (STATUSES.includes(status)) { where.push('status = ?'); args.push(status); }
       if (SOURCES.includes(source)) { where.push('source = ?'); args.push(source); }
@@ -176,6 +239,19 @@ function repo(db) {
       await addActivity(id, 'whatsapp', text);
     },
     activities: (leadId) => all('SELECT * FROM activities WHERE lead_id = ? ORDER BY id DESC', leadId),
+    addActivity,
+    setBotStep: (leadId, step) => run('UPDATE leads SET bot_step=? WHERE id=?', step, leadId),
+    /** Mensajes de la conversación en orden: el primero es el `interest` con el que se creó el lead. */
+    async conversation(lead) {
+      const rows = await all("SELECT kind, text FROM activities WHERE lead_id=? AND kind IN ('mensaje','bot') ORDER BY id", lead.id);
+      return [{ from: 'cliente', text: lead.interest }, ...rows.map((r) => ({ from: r.kind === 'bot' ? 'bot' : 'cliente', text: r.text }))]
+        .filter((m) => m.text);
+    },
+    simLead: (businessId, channel) => get("SELECT * FROM leads WHERE business_id=? AND external_id=?", businessId, `sim:${channel}`),
+    async deleteSimLeads(businessId) {
+      const rows = await all("SELECT id FROM leads WHERE business_id=? AND external_id LIKE 'sim:%'", businessId);
+      for (const r of rows) await this.deleteLead(businessId, r.id);
+    },
     async deleteLead(businessId, id) {
       if (!await get('SELECT 1 FROM leads WHERE business_id=? AND id=?', businessId, id)) return;
       await run('DELETE FROM activities WHERE lead_id=?', id);
@@ -189,9 +265,9 @@ function repo(db) {
       const since = `-${Number(days)} days`;
       const [visits, leads, byStatus, perDay] = await Promise.all([
         all(`SELECT source, COUNT(*) n FROM visits WHERE business_id=? AND created_at >= datetime('now', ?) GROUP BY source`, businessId, since),
-        all(`SELECT source, COUNT(*) n FROM leads WHERE business_id=? AND created_at >= datetime('now', ?) GROUP BY source`, businessId, since),
-        all('SELECT status, COUNT(*) n FROM leads WHERE business_id=? GROUP BY status', businessId),
-        all(`SELECT date(created_at) d, COUNT(*) n FROM leads WHERE business_id=? AND created_at >= datetime('now', ?) GROUP BY d ORDER BY d`, businessId, since),
+        all(`SELECT source, COUNT(*) n FROM leads WHERE business_id=? AND ${REAL} AND created_at >= datetime('now', ?) GROUP BY source`, businessId, since),
+        all(`SELECT status, COUNT(*) n FROM leads WHERE business_id=? AND ${REAL} GROUP BY status`, businessId),
+        all(`SELECT date(created_at) d, COUNT(*) n FROM leads WHERE business_id=? AND ${REAL} AND created_at >= datetime('now', ?) GROUP BY d ORDER BY d`, businessId, since),
       ]);
       const toMap = (rows, key) => Object.fromEntries(rows.map((r) => [r[key], Number(r.n)]));
       return {
@@ -202,4 +278,4 @@ function repo(db) {
   };
 }
 
-module.exports = { openDb, migrate, repo, normalizeSource, SOURCES, STATUSES };
+module.exports = { openDb, migrate, repo, normalizeSource, SOURCES, STATUSES, CHANNELS };

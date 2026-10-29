@@ -1,5 +1,6 @@
 'use strict';
 const { SOURCES, STATUSES } = require('./db');
+const { fillTemplate } = require('./template');
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -9,12 +10,6 @@ const STATUS_LABEL = { nuevo: 'Nuevo', contactado: 'Contactado', interesado: 'In
 
 const digits = (phone) => String(phone || '').replace(/\D/g, '');
 
-function fillTemplate(tpl, biz, lead) {
-  return String(tpl || '')
-    .replaceAll('{nombre}', (lead?.name || '').replace(/^@/, '') || 'hola')
-    .replaceAll('{comercio}', biz.name)
-    .replaceAll('{oferta}', biz.offer || 'consúltanos sin compromiso');
-}
 
 function waLink(phone, text) {
   const n = digits(phone);
@@ -29,6 +24,8 @@ function layout(title, body, { biz, flash } = {}) {
       <nav>
         <a href="/panel">Resumen</a>
         <a href="/panel/leads">Leads</a>
+        <a href="/panel/automatizacion">Automatización</a>
+        <a href="/panel/simulador">Probar bot</a>
         <a href="/panel/enlaces">Enlaces</a>
         <a href="/panel/ajustes">Ajustes</a>
         <form method="post" action="/salir"><button class="link">Salir</button></form>
@@ -200,7 +197,7 @@ function leadDetail(biz, lead, activities, flash) {
   const msg = fillTemplate(biz.wa_template, biz, lead);
   const statusButtons = STATUSES.map((s) => `
     <button name="status" value="${s}" class="status ${s} ${lead.status === s ? 'active' : ''}">${STATUS_LABEL[s]}</button>`).join('');
-  const kindLabel = { alta: 'Alta', estado: 'Estado', nota: 'Nota', mensaje: 'Mensaje', whatsapp: 'WhatsApp' };
+  const kindLabel = { alta: 'Alta', estado: 'Estado', nota: 'Nota', mensaje: 'Mensaje del cliente', whatsapp: 'WhatsApp', bot: 'Respuesta automática', respuesta: 'Respuesta a pregunta', error: 'Error' };
   return layout(lead.name || 'Lead', `
   <p><a href="/panel/leads">← Volver</a></p>
   <div class="row between"><h1>${esc(lead.name || lead.handle || 'Sin nombre')}</h1>
@@ -300,6 +297,110 @@ function settingsPage(biz, flash) {
   </form>`, { biz, flash });
 }
 
+// ---------- Automatización ----------
+
+const CHANNEL_LABEL = { ig_comment: 'Comentario de Instagram', ig_dm: 'DM de Instagram', whatsapp: 'WhatsApp' };
+
+function automationPage(biz, rules, { aiAvailable, baseUrl }, flash) {
+  const ruleRows = rules.map((r) => `
+    <tr class="${r.active ? '' : 'off'}">
+      <td><span class="tag ${r.channel === 'whatsapp' ? 'whatsapp' : 'instagram'}">${CHANNEL_LABEL[r.channel]}</span></td>
+      <td>${r.keywords ? esc(r.keywords) : `<span class="muted">${r.channel === 'ig_comment' ? 'cualquier comentario' : 'primer mensaje'}</span>`}</td>
+      <td class="wrapcell">${esc(r.reply)}${r.public_reply ? `<br><small class="muted">Pública: ${esc(r.public_reply)}</small>` : ''}</td>
+      <td>${r.hits}</td>
+      <td><div class="row">
+        <form method="post" action="/panel/automatizacion/reglas/${r.id}/activar"><button class="btn small ghost">${r.active ? 'Pausar' : 'Activar'}</button></form>
+        <form method="post" action="/panel/automatizacion/reglas/${r.id}/borrar" onsubmit="return confirm('¿Borrar esta regla?')"><button class="link danger">Borrar</button></form>
+      </div></td>
+    </tr>`).join('');
+
+  const connected = (ok) => (ok ? '<span class="status cliente">Conectado</span>' : '<span class="status perdido">Sin conectar</span>');
+
+  return layout('Automatización', `
+  <div class="row between"><h1>Respuestas automáticas</h1><a class="btn" href="/panel/simulador">Probar el bot</a></div>
+  <p class="muted">El bot contesta solo en Instagram y WhatsApp, guarda a cada persona como lead y te avisa en el panel. Puedes probarlo en el simulador sin conectar nada.</p>
+
+  <section class="card">
+    <h2>1. Reglas por palabra clave</h2>
+    ${rules.length ? `<div class="tablewrap"><table><thead><tr><th>Dónde</th><th>Palabras clave</th><th>Respuesta</th><th>Usos</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table></div>`
+      : `<p class="muted">No tienes reglas.</p><form method="post" action="/panel/automatizacion/recomendadas"><button class="btn ghost">Añadir reglas recomendadas</button></form>`}
+    <h3>Nueva regla</h3>
+    <form method="post" action="/panel/automatizacion/reglas" class="grid2">
+      <label>Dónde<select name="channel">
+        <option value="ig_comment">Comentario de Instagram → DM privado</option>
+        <option value="ig_dm">DM de Instagram</option>
+        <option value="whatsapp">WhatsApp</option></select></label>
+      <label>Palabras clave (separadas por comas)<input name="keywords" placeholder="precio, info, quiero"></label>
+      <label class="full">Respuesta<textarea name="reply" rows="2" required placeholder="¡Hola{nombre}! Aquí tienes toda la info 👉 {enlace}"></textarea></label>
+      <label class="full">Respuesta pública en el comentario (solo comentarios, opcional)<input name="public_reply" placeholder="¡Te hemos enviado un mensaje privado! 📩"></label>
+      <button class="btn">Añadir regla</button>
+    </form>
+    <p class="muted small">Sin palabras clave: en DMs y WhatsApp responde al <b>primer mensaje</b> (bienvenida); en comentarios, a <b>cualquier</b> comentario.
+      Variables: {nombre}, {comercio}, {oferta}, {enlace} (tu página de captación).</p>
+  </section>
+
+  <form method="post" action="/panel/automatizacion/bot" class="cols">
+    <section class="card stack">
+      <h2>2. Preguntas de cualificación</h2>
+      <p class="muted small">Cuando alguien escribe por primera vez por DM o WhatsApp, el bot le hace estas preguntas una a una y guarda las respuestas en su ficha.</p>
+      <label>Una pregunta por línea<textarea name="bot_questions" rows="4" placeholder="¿Cómo te llamas?\n¿Qué estás buscando?\n¿Para cuándo lo necesitas?">${esc(biz.bot_questions)}</textarea></label>
+      <label>Mensaje final<textarea name="bot_closing" rows="2">${esc(biz.bot_closing)}</textarea></label>
+      <button class="btn">Guardar</button>
+    </section>
+    <section class="card stack">
+      <h2>3. Asistente con IA</h2>
+      ${aiAvailable ? '' : '<p class="error small">El servidor no tiene configurada la clave de IA (ANTHROPIC_API_KEY). Puedes dejar la información preparada.</p>'}
+      <label class="check"><input type="checkbox" name="ai_enabled" value="1" ${biz.ai_enabled ? 'checked' : ''}>
+        Responder con IA cuando ninguna regla encaje (solo a leads en estado «Nuevo»)</label>
+      <label>Información del negocio para la IA
+        <textarea name="ai_info" rows="7" placeholder="Horario: L-V 10:00-20:00, S 10:00-14:00&#10;Dirección: Calle Mayor 5, Valencia&#10;Servicios y precios: ramo básico desde 25 €…&#10;Envíos: en el día dentro de Valencia">${esc(biz.ai_info)}</textarea></label>
+      <p class="muted small">La IA solo usa esta información. Si le preguntan algo que no está aquí, dirá que una persona contestará en breve.</p>
+      <button class="btn">Guardar</button>
+    </section>
+  </form>
+
+  <section class="card">
+    <h2>4. Conexión con Meta</h2>
+    <p>Instagram ${connected(biz.ig_account_id && biz.ig_access_token)} &nbsp; WhatsApp ${connected(biz.wa_phone_number_id && biz.wa_access_token)}</p>
+    <form method="post" action="/panel/automatizacion/meta" class="grid2">
+      <label>ID de cuenta de Instagram<input name="ig_account_id" value="${esc(biz.ig_account_id)}"></label>
+      <label>Token de acceso de Instagram<input name="ig_access_token" type="password" autocomplete="off" placeholder="${biz.ig_access_token ? '•••••• guardado (déjalo vacío para mantenerlo)' : 'IGAA…'}"></label>
+      <label>Phone Number ID de WhatsApp<input name="wa_phone_number_id" value="${esc(biz.wa_phone_number_id)}"></label>
+      <label>Token de acceso de WhatsApp<input name="wa_access_token" type="password" autocomplete="off" placeholder="${biz.wa_access_token ? '•••••• guardado (déjalo vacío para mantenerlo)' : 'EAA…'}"></label>
+      <button class="btn">Guardar conexión</button>
+    </form>
+    <p class="muted small">Webhook para tu app de Meta: <code>${esc(baseUrl)}/webhooks/meta</code></p>
+  </section>`, { biz, flash });
+}
+
+function simulatorPage(biz, channel, messages, { aiAvailable, comment }, flash) {
+  const tabs = ['whatsapp', 'ig_dm', 'ig_comment'].map((c) =>
+    `<a class="btn small ${c === channel ? '' : 'ghost'}" href="/panel/simulador?canal=${c}">${CHANNEL_LABEL[c]}</a>`).join('');
+  let chat;
+  if (channel === 'ig_comment') {
+    chat = comment ? `
+      <div class="bubble cliente"><small>Comentario</small>${esc(comment.text)}</div>
+      ${comment.dm ? `<div class="bubble bot"><small>DM privado automático</small>${esc(comment.dm)}</div>` : '<p class="muted">Ninguna regla de comentarios coincide: no se respondería.</p>'}
+      ${comment.publicReply ? `<div class="bubble bot"><small>Respuesta pública</small>${esc(comment.publicReply)}</div>` : ''}`
+      : '<p class="muted">Escribe un comentario como si fueras un seguidor (por ejemplo «¿precio?»).</p>';
+  } else {
+    chat = messages.length ? messages.map((m) => `<div class="bubble ${m.from}">${esc(m.text)}</div>`).join('')
+      : '<p class="muted">Escribe un mensaje como si fueras un cliente.</p>';
+  }
+  return layout('Probar bot', `
+  <h1>Probar el bot</h1>
+  <p class="muted">Simula lo que vería un cliente. No se envía nada de verdad ni se guarda como lead.${aiAvailable ? '' : ' (La IA no está disponible en este servidor.)'}</p>
+  <div class="row">${tabs}</div>
+  <section class="card chat">${chat}</section>
+  <form method="post" action="/panel/simulador" class="row">
+    <input type="hidden" name="canal" value="${esc(channel)}">
+    <input name="text" required autofocus autocomplete="off" placeholder="${channel === 'ig_comment' ? 'Escribe un comentario…' : 'Escribe un mensaje…'}" style="flex:1">
+    <button class="btn">Enviar</button>
+  </form>
+  ${channel === 'ig_comment' ? '' : `<form method="post" action="/panel/simulador/reiniciar"><input type="hidden" name="canal" value="${esc(channel)}"><button class="link">Empezar de nuevo</button></form>`}
+  <p class="muted small">¿No responde lo que esperas? Ajusta las reglas en <a href="/panel/automatizacion">Automatización</a>.</p>`, { biz, flash });
+}
+
 function notFound(msg = 'Página no encontrada') {
   return layout('No encontrado', `<section class="card"><h1>${esc(msg)}</h1><p><a href="/">Inicio</a></p></section>`);
 }
@@ -315,5 +416,5 @@ function home() {
 
 module.exports = {
   esc, fillTemplate, waLink, publicPage, thanksPage, authPage, dashboard,
-  leadsPage, leadDetail, linksPage, settingsPage, notFound, home, layout,
+  leadsPage, leadDetail, linksPage, settingsPage, notFound, home, layout, automationPage, simulatorPage,
 };

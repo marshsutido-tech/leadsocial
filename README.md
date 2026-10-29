@@ -11,6 +11,11 @@ Cada comercio tiene:
   - Comentarios de Instagram con palabras clave («precio», «info»…) → lead con el @usuario.
   - Mensajes entrantes a WhatsApp Business (Cloud API) → lead con nombre y teléfono.
 - **Panel/CRM**: resumen (leads por día, visitas y conversión por red), lista con filtros y búsqueda, estados (Nuevo → Contactado → Interesado → Cliente / Perdido), notas e historial, alta manual (p. ej. DMs de TikTok) y exportación a CSV.
+- **Respuestas automáticas (bot)** en Instagram y WhatsApp (sección *Automatización*):
+  - Reglas por palabra clave: comentario «precio» → DM privado con el enlace + respuesta pública; bienvenida al primer DM o WhatsApp.
+  - Preguntas de cualificación una a una; las respuestas quedan en la ficha del lead.
+  - Asistente con IA (Claude) que responde con la información del negocio cuando ninguna regla encaja. Requiere `ANTHROPIC_API_KEY`.
+  - **Simulador** (*Probar bot*) para probarlo todo sin conectar Meta: ideal para enseñárselo a un cliente.
 - **Seguimiento por WhatsApp** con un clic: abre `wa.me` con un mensaje personalizable (`{nombre}`, `{comercio}`, `{oferta}`), registra el contacto y pasa el lead a «Contactado».
 
 Varios comercios pueden usar la misma instalación; cada uno solo ve sus leads.
@@ -40,12 +45,13 @@ Crea una cuenta en `/registro`, completa **Ajustes** y copia los enlaces de **En
 
 Tests: `npm test`.
 
-## Conectar Instagram y WhatsApp (opcional)
+## Conectar Instagram y WhatsApp (para que el bot envíe mensajes reales)
 
 1. Crea una app en [Meta for Developers](https://developers.facebook.com/) con los productos *Instagram* (cuenta profesional) y *WhatsApp*.
 2. Webhook: `https://TU_DOMINIO/webhooks/meta`, token de verificación = `META_VERIFY_TOKEN`. Pon el *App Secret* en `META_APP_SECRET` (se validan las firmas `X-Hub-Signature-256`).
 3. Suscribe los campos `messages` y `comments` (Instagram) y `messages` (WhatsApp).
-4. En **Ajustes** del comercio guarda su *ID de cuenta de Instagram* y su *Phone Number ID* de WhatsApp.
+4. En **Automatización → Conexión con Meta** cada comercio guarda su *ID de cuenta de Instagram* + token (API de Instagram con inicio de sesión de Instagram, permisos `instagram_business_basic`, `instagram_business_manage_messages`, `instagram_business_manage_comments`) y su *Phone Number ID* de WhatsApp + token.
+5. Para usarlo con cuentas de otros comercios, la app de Meta debe pasar la revisión (*App Review*) de esos permisos.
 
 TikTok no ofrece una API pública de DMs para comercios: se capta mediante el enlace de la bio (`?src=tiktok`) y el alta manual.
 
@@ -56,13 +62,16 @@ src/server.js        rutas (público, acceso, panel)
 src/db.js            esquema y consultas (SQLite local o Turso)
 src/auth.js          contraseñas (scrypt) y sesiones con cookie firmada
 src/integrations.js  webhooks de Meta (Instagram + WhatsApp)
+src/bot.js           motor de respuestas automáticas (reglas, preguntas, IA)
+src/ai.js            asistente con IA (Claude)
+src/meta.js          envío de mensajes con las APIs de Meta
 src/views.js         HTML del servidor
 public/style.css     estilos (claro/oscuro, adaptado a móvil)
 ```
 
 ## Siguientes pasos sugeridos
 
-- Respuesta automática a DMs/comentarios (Graph API) y plantillas de WhatsApp Cloud API.
+- Plantillas de WhatsApp para escribir a leads pasadas 24 h.
 - Recordatorios de leads sin contactar (email o WhatsApp al comercio).
 - Recuperación de contraseña y usuarios múltiples por comercio.
 - Texto legal de privacidad (RGPD) en la página pública.

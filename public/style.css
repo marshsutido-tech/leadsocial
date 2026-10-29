@@ -75,3 +75,12 @@ pre.msg { white-space: pre-wrap; background: var(--bg); border: 1px solid var(--
   .grid2 { grid-template-columns: 1fr; }
   table.leads th:nth-child(3), table.leads td:nth-child(3) { display: none; }
 }
+h3 { font-size: 1rem; margin: 1.2em 0 .5em; }
+tr.off { opacity: .5; }
+td.wrapcell { max-width: 380px; white-space: pre-wrap; word-break: break-word; }
+.chat { display: flex; flex-direction: column; gap: 8px; min-height: 220px; }
+.bubble { max-width: 80%; padding: 8px 12px; border-radius: 14px; white-space: pre-wrap; word-break: break-word; }
+.bubble small { display: block; font-size: .72rem; opacity: .75; }
+.bubble.cliente { align-self: flex-end; background: var(--accent); color: var(--accent-ink); border-bottom-right-radius: 4px; }
+.bubble.bot { align-self: flex-start; background: var(--bg); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.tablewrap { overflow-x: auto; } .tablewrap table { min-width: 560px; }
