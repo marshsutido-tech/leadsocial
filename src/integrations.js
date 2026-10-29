@@ -27,20 +27,20 @@ function matchesKeyword(text, keywords) {
   return words.some((w) => t.includes(w));
 }
 
-function processMetaPayload(repo, body) {
+async function processMetaPayload(repo, body) {
   const results = [];
   const entries = Array.isArray(body?.entry) ? body.entry : [];
 
   if (body?.object === 'instagram') {
     for (const entry of entries) {
-      const biz = repo.businessByIgAccount(entry.id);
+      const biz = await repo.businessByIgAccount(entry.id);
       if (!biz) continue;
 
       for (const m of entry.messaging || []) {
         const senderId = m.sender?.id;
         if (!senderId || senderId === String(entry.id) || m.message?.is_echo) continue;
         const text = m.message?.text || '[adjunto]';
-        results.push(repo.upsertLead({
+        results.push(await repo.upsertLead({
           business_id: biz.id, source: 'instagram', channel: 'dm',
           external_id: `dm:${senderId}`, interest: text,
         }));
@@ -51,7 +51,7 @@ function processMetaPayload(repo, body) {
         const v = c.value;
         if (!matchesKeyword(v.text, biz.keywords)) continue;
         const username = v.from?.username || '';
-        results.push(repo.upsertLead({
+        results.push(await repo.upsertLead({
           business_id: biz.id, source: 'instagram', channel: 'comentario',
           external_id: `user:${v.from?.id || username}`,
           name: username ? `@${username}` : '', handle: username, interest: v.text,
@@ -64,12 +64,12 @@ function processMetaPayload(repo, body) {
     for (const entry of entries) {
       for (const c of entry.changes || []) {
         const v = c.value || {};
-        const biz = repo.businessByWaPhoneId(v.metadata?.phone_number_id);
+        const biz = await repo.businessByWaPhoneId(v.metadata?.phone_number_id);
         if (!biz) continue;
         const names = Object.fromEntries((v.contacts || []).map((ct) => [ct.wa_id, ct.profile?.name]));
         for (const msg of v.messages || []) {
           const text = msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || `[${msg.type}]`;
-          results.push(repo.upsertLead({
+          results.push(await repo.upsertLead({
             business_id: biz.id, source: 'whatsapp', channel: 'mensaje',
             external_id: msg.from, phone: `+${msg.from}`, name: names[msg.from] || '', interest: text,
           }));
@@ -89,10 +89,10 @@ function mountMetaWebhooks(app, repo) {
     res.sendStatus(403);
   });
 
-  app.post('/webhooks/meta', (req, res) => {
+  app.post('/webhooks/meta', async (req, res) => {
     if (!verifySignature(req)) return res.sendStatus(401);
     try {
-      processMetaPayload(repo, req.body);
+      await processMetaPayload(repo, req.body);
     } catch (err) {
       console.error('Error procesando webhook de Meta:', err);
     }

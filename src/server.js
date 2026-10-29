@@ -2,7 +2,7 @@
 const path = require('node:path');
 const crypto = require('node:crypto');
 const express = require('express');
-const { openDb, repo: makeRepo, normalizeSource } = require('./db');
+const { openDb, migrate, repo: makeRepo, normalizeSource } = require('./db');
 const { hashPassword, verifyPassword, sessions } = require('./auth');
 const { mountMetaWebhooks } = require('./integrations');
 const v = require('./views');
@@ -33,11 +33,12 @@ function rateLimiter({ windowMs, max }) {
   };
 }
 
-function createApp({ db = openDb(), secret = process.env.SESSION_SECRET } = {}) {
+async function createApp({ db = openDb(), secret = process.env.SESSION_SECRET } = {}) {
   if (!secret) {
     secret = crypto.randomBytes(32).toString('hex');
     if (process.env.NODE_ENV === 'production') throw new Error('Falta SESSION_SECRET');
   }
+  await migrate(db);
   const repo = makeRepo(db);
   const session = sessions(secret);
   const allowLead = rateLimiter({ windowMs: 10 * 60 * 1000, max: 5 });
@@ -60,17 +61,17 @@ function createApp({ db = openDb(), secret = process.env.SESSION_SECRET } = {}) 
   // ---------- Público ----------
   app.get('/', (req, res) => (req.businessId ? res.redirect('/panel') : res.send(v.home())));
 
-  app.get('/c/:slug', (req, res) => {
-    const biz = repo.businessBySlug(req.params.slug);
+  app.get('/c/:slug', async (req, res) => {
+    const biz = await repo.businessBySlug(req.params.slug);
     if (!biz) return res.status(404).send(v.notFound('Este comercio no existe'));
     const src = normalizeSource(req.query.src);
     const campaign = trim(req.query.campaign, 60);
-    repo.recordVisit(biz.id, src, campaign);
+    await repo.recordVisit(biz.id, src, campaign);
     res.send(v.publicPage(biz, { src, campaign }));
   });
 
-  app.post('/c/:slug', (req, res) => {
-    const biz = repo.businessBySlug(req.params.slug);
+  app.post('/c/:slug', async (req, res) => {
+    const biz = await repo.businessBySlug(req.params.slug);
     if (!biz) return res.status(404).send(v.notFound('Este comercio no existe'));
     const src = normalizeSource(req.body.src);
     const values = {
@@ -91,32 +92,32 @@ function createApp({ db = openDb(), secret = process.env.SESSION_SECRET } = {}) 
     else if (!req.body.consent) error = 'Necesitamos tu consentimiento para contactarte.';
     if (error) return res.status(400).send(v.publicPage(biz, { src, campaign, values, error }));
 
-    repo.upsertLead({ business_id: biz.id, ...values, source: src, channel: 'formulario', campaign, consent: true });
+    await repo.upsertLead({ business_id: biz.id, ...values, source: src, channel: 'formulario', campaign, consent: true });
     res.send(v.thanksPage(biz, values));
   });
 
   // ---------- Acceso ----------
   app.get('/registro', (_req, res) => res.send(v.authPage('registro')));
-  app.post('/registro', (req, res) => {
+  app.post('/registro', async (req, res) => {
     const values = { name: trim(req.body.name, 80), email: trim(req.body.email, 120).toLowerCase(), whatsapp: trim(req.body.whatsapp, 30) };
     const password = String(req.body.password || '');
     let error;
     if (!values.name || !values.email) error = 'Completa nombre y email.';
     else if (password.length < 8) error = 'La contraseña debe tener al menos 8 caracteres.';
-    else if (repo.businessByEmail(values.email)) error = 'Ya existe una cuenta con ese email.';
+    else if (await repo.businessByEmail(values.email)) error = 'Ya existe una cuenta con ese email.';
     if (error) return res.status(400).send(v.authPage('registro', { error, values }));
 
     let slug = slugify(values.name);
-    for (let i = 2; repo.businessBySlug(slug); i++) slug = `${slugify(values.name)}-${i}`;
-    const id = repo.createBusiness({ ...values, slug, password_hash: hashPassword(password) });
+    for (let i = 2; await repo.businessBySlug(slug); i++) slug = `${slugify(values.name)}-${i}`;
+    const id = await repo.createBusiness({ ...values, slug, password_hash: hashPassword(password) });
     session.issue(res, id);
     res.redirect('/panel/enlaces?ok=bienvenida');
   });
 
   app.get('/entrar', (_req, res) => res.send(v.authPage('entrar')));
-  app.post('/entrar', (req, res) => {
+  app.post('/entrar', async (req, res) => {
     const email = trim(req.body.email, 120).toLowerCase();
-    const biz = repo.businessByEmail(email);
+    const biz = await repo.businessByEmail(email);
     if (!biz || !verifyPassword(String(req.body.password || ''), biz.password_hash)) {
       return res.status(401).send(v.authPage('entrar', { error: 'Email o contraseña incorrectos.', values: { email } }));
     }
@@ -128,32 +129,32 @@ function createApp({ db = openDb(), secret = process.env.SESSION_SECRET } = {}) 
 
   // ---------- Panel (requiere sesión) ----------
   const panel = express.Router();
-  panel.use((req, res, next) => {
-    req.biz = req.businessId && repo.businessById(req.businessId);
+  panel.use(async (req, res, next) => {
+    req.biz = req.businessId && await repo.businessById(req.businessId);
     if (!req.biz) return res.redirect('/entrar');
     next();
   });
-  const leadOr404 = (req, res) => {
-    const lead = repo.leadById(req.biz.id, Number(req.params.id));
+  const leadOr404 = async (req, res) => {
+    const lead = await repo.leadById(req.biz.id, Number(req.params.id));
     if (!lead) res.status(404).send(v.notFound('Lead no encontrado'));
     return lead;
   };
 
-  panel.get('/', (req, res) => {
-    res.send(v.dashboard(req.biz, repo.stats(req.biz.id), repo.listLeads(req.biz.id), flash(req)));
+  panel.get('/', async (req, res) => {
+    res.send(v.dashboard(req.biz, await repo.stats(req.biz.id), await repo.listLeads(req.biz.id), flash(req)));
   });
 
   const filtersFrom = (q) => ({ q: trim(q.q, 80), status: trim(q.status, 20), source: trim(q.source, 20) });
 
-  panel.get('/leads', (req, res) => {
+  panel.get('/leads', async (req, res) => {
     const filters = filtersFrom(req.query);
-    const leads = repo.listLeads(req.biz.id, { ...filters, search: filters.q });
+    const leads = await repo.listLeads(req.biz.id, { ...filters, search: filters.q });
     res.send(v.leadsPage(req.biz, leads, filters, flash(req)));
   });
 
-  panel.get('/leads.csv', (req, res) => {
+  panel.get('/leads.csv', async (req, res) => {
     const filters = filtersFrom(req.query);
-    const leads = repo.listLeads(req.biz.id, { ...filters, search: filters.q });
+    const leads = await repo.listLeads(req.biz.id, { ...filters, search: filters.q });
     const cols = ['id', 'created_at', 'name', 'phone', 'email', 'handle', 'source', 'channel', 'campaign', 'status', 'interest', 'consent'];
     const cell = (x) => {
       let s = String(x ?? '');
@@ -164,8 +165,8 @@ function createApp({ db = openDb(), secret = process.env.SESSION_SECRET } = {}) 
     res.type('text/csv; charset=utf-8').attachment(`leads-${req.biz.slug}.csv`).send('﻿' + csv);
   });
 
-  panel.post('/leads', (req, res) => {
-    repo.upsertLead({
+  panel.post('/leads', async (req, res) => {
+    await repo.upsertLead({
       business_id: req.biz.id, name: trim(req.body.name, 80), phone: trim(req.body.phone, 30),
       handle: trim(req.body.handle, 60).replace(/^@/, ''), interest: trim(req.body.interest),
       source: req.body.source, channel: 'manual',
@@ -173,56 +174,56 @@ function createApp({ db = openDb(), secret = process.env.SESSION_SECRET } = {}) 
     res.redirect('/panel/leads?ok=creado');
   });
 
-  panel.get('/leads/:id', (req, res) => {
-    const lead = leadOr404(req, res);
-    if (lead) res.send(v.leadDetail(req.biz, lead, repo.activities(lead.id), flash(req)));
+  panel.get('/leads/:id', async (req, res) => {
+    const lead = await leadOr404(req, res);
+    if (lead) res.send(v.leadDetail(req.biz, lead, await repo.activities(lead.id), flash(req)));
   });
 
-  panel.post('/leads/:id', (req, res) => {
-    const lead = leadOr404(req, res);
+  panel.post('/leads/:id', async (req, res) => {
+    const lead = await leadOr404(req, res);
     if (!lead) return;
-    repo.updateLeadContact(req.biz.id, lead.id, {
+    await repo.updateLeadContact(req.biz.id, lead.id, {
       name: trim(req.body.name, 80), phone: trim(req.body.phone, 30),
       email: trim(req.body.email, 120), handle: trim(req.body.handle, 60).replace(/^@/, ''),
     });
     res.redirect(`/panel/leads/${lead.id}?ok=guardado`);
   });
 
-  panel.post('/leads/:id/estado', (req, res) => {
-    const lead = leadOr404(req, res);
+  panel.post('/leads/:id/estado', async (req, res) => {
+    const lead = await leadOr404(req, res);
     if (!lead) return;
-    repo.setLeadStatus(req.biz.id, lead.id, req.body.status);
+    await repo.setLeadStatus(req.biz.id, lead.id, req.body.status);
     res.redirect(`/panel/leads/${lead.id}`);
   });
 
-  panel.post('/leads/:id/notas', (req, res) => {
-    const lead = leadOr404(req, res);
+  panel.post('/leads/:id/notas', async (req, res) => {
+    const lead = await leadOr404(req, res);
     if (!lead) return;
     const text = trim(req.body.text, 1000);
-    if (text) repo.addNote(req.biz.id, lead.id, text);
+    if (text) await repo.addNote(req.biz.id, lead.id, text);
     res.redirect(`/panel/leads/${lead.id}?ok=nota`);
   });
 
-  panel.get('/leads/:id/whatsapp', (req, res) => {
-    const lead = leadOr404(req, res);
+  panel.get('/leads/:id/whatsapp', async (req, res) => {
+    const lead = await leadOr404(req, res);
     if (!lead) return;
     const link = v.waLink(lead.phone, v.fillTemplate(req.biz.wa_template, req.biz, lead));
     if (!link) return res.redirect(`/panel/leads/${lead.id}`);
-    repo.logContact(req.biz.id, lead.id, 'Mensaje de seguimiento abierto en WhatsApp');
-    if (lead.status === 'nuevo') repo.setLeadStatus(req.biz.id, lead.id, 'contactado');
+    await repo.logContact(req.biz.id, lead.id, 'Mensaje de seguimiento abierto en WhatsApp');
+    if (lead.status === 'nuevo') await repo.setLeadStatus(req.biz.id, lead.id, 'contactado');
     res.redirect(link);
   });
 
-  panel.post('/leads/:id/borrar', (req, res) => {
-    repo.deleteLead(req.biz.id, Number(req.params.id));
+  panel.post('/leads/:id/borrar', async (req, res) => {
+    await repo.deleteLead(req.biz.id, Number(req.params.id));
     res.redirect('/panel/leads?ok=borrado');
   });
 
   panel.get('/enlaces', (req, res) => res.send(v.linksPage(req.biz, baseUrl(req), flash(req))));
   panel.get('/ajustes', (req, res) => res.send(v.settingsPage(req.biz, flash(req))));
-  panel.post('/ajustes', (req, res) => {
+  panel.post('/ajustes', async (req, res) => {
     const b = req.body;
-    repo.updateBusiness(req.biz.id, {
+    await repo.updateBusiness(req.biz.id, {
       name: trim(b.name, 80) || req.biz.name,
       headline: trim(b.headline, 140), offer: trim(b.offer, 140),
       whatsapp: trim(b.whatsapp, 30),
@@ -242,7 +243,9 @@ function createApp({ db = openDb(), secret = process.env.SESSION_SECRET } = {}) 
 
 if (require.main === module) {
   const port = Number(process.env.PORT) || 3000;
-  createApp().listen(port, () => console.log(`LeadSocial escuchando en http://localhost:${port}`));
+  createApp()
+    .then((app) => app.listen(port, () => console.log(`LeadSocial escuchando en http://localhost:${port}`)))
+    .catch((err) => { console.error('No se pudo arrancar LeadSocial:', err); process.exit(1); });
 }
 
 module.exports = { createApp, slugify };

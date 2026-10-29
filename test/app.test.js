@@ -11,7 +11,7 @@ process.env.META_APP_SECRET = 'appsecret';
 let server, base, repo;
 
 test.before(async () => {
-  const app = createApp({ db: openDb(':memory:'), secret: 'test' });
+  const app = await createApp({ db: openDb(':memory:'), secret: 'test' });
   repo = app.locals.repo;
   await new Promise((r) => { server = app.listen(0, r); });
   base = `http://127.0.0.1:${server.address().port}`;
@@ -37,7 +37,7 @@ test('registro crea comercio y sesión', async () => {
   const res = await post('/registro', { name: 'Panadería Óscar', email: 'o@x.es', password: 'secreto123', whatsapp: '+34 600 111 222' });
   assert.equal(res.status, 302);
   cookie = res.headers.get('set-cookie').split(';')[0];
-  biz = repo.businessByEmail('o@x.es');
+  biz = await repo.businessByEmail('o@x.es');
   assert.equal(biz.slug, 'panaderia-oscar');
   assert.equal((await get('/panel', cookie)).status, 200);
   assert.equal((await get('/panel')).status, 302, 'sin sesión redirige');
@@ -49,10 +49,10 @@ test('formulario público capta lead con origen y campaña', async () => {
   const res = await post('/c/panaderia-oscar', { src: 'instagram', campaign: 'reel1', name: 'Ana', phone: '+34 611 222 333', interest: 'Tartas', consent: '1' });
   assert.equal(res.status, 200);
   assert.match(await res.text(), /Gracias, Ana/);
-  const [lead] = repo.listLeads(biz.id);
+  const [lead] = await repo.listLeads(biz.id);
   assert.equal(lead.source, 'instagram');
   assert.equal(lead.campaign, 'reel1');
-  const stats = repo.stats(biz.id);
+  const stats = await repo.stats(biz.id);
   assert.equal(stats.visits.instagram, 1);
   assert.equal(stats.leads.instagram, 1);
 });
@@ -61,23 +61,23 @@ test('formulario valida consentimiento e ignora bots', async () => {
   const bad = await post('/c/panaderia-oscar', { name: 'X', phone: '600111222' });
   assert.equal(bad.status, 400);
   await post('/c/panaderia-oscar', { name: 'Bot', phone: '600111222', consent: '1', website: 'spam' });
-  assert.equal(repo.listLeads(biz.id, { search: 'Bot' }).length, 0);
+  assert.equal((await repo.listLeads(biz.id, { search: 'Bot' })).length, 0);
 });
 
 test('seguimiento por WhatsApp marca como contactado', async () => {
-  const [lead] = repo.listLeads(biz.id);
+  const [lead] = await repo.listLeads(biz.id);
   const res = await get(`/panel/leads/${lead.id}/whatsapp`, cookie);
   assert.equal(res.status, 302);
   const loc = res.headers.get('location');
   assert.ok(loc.startsWith('https://wa.me/34611222333?text='));
   assert.match(decodeURIComponent(loc), /Hola Ana, soy de Panadería Óscar. ¡Gracias por escribirnos!/);
-  assert.equal(repo.leadById(biz.id, lead.id).status, 'contactado');
+  assert.equal((await repo.leadById(biz.id, lead.id)).status, 'contactado');
 });
 
 test('otro comercio no ve leads ajenos', async () => {
   const res = await post('/registro', { name: 'Otra', email: 'b@x.es', password: 'secreto123' });
   const other = res.headers.get('set-cookie').split(';')[0];
-  const [lead] = repo.listLeads(biz.id);
+  const [lead] = await repo.listLeads(biz.id);
   assert.equal((await get(`/panel/leads/${lead.id}`, other)).status, 404);
 });
 
@@ -101,11 +101,11 @@ test('webhook de Meta: verificación, firma, DMs, comentarios y WhatsApp', async
     messages: [{ from: '34622000111', type: 'text', text: { body: 'Quiero encargar' } }],
   } }] }] });
 
-  const ig = repo.listLeads(biz.id, { source: 'instagram' });
+  const ig = await repo.listLeads(biz.id, { source: 'instagram' });
   assert.equal(ig.filter((l) => l.channel === 'dm').length, 1, 'DM deduplicado');
   assert.ok(ig.some((l) => l.handle === 'lucia'));
   assert.ok(!ig.some((l) => l.handle === 'pepe'), 'comentario sin palabra clave ignorado');
-  const [wa] = repo.listLeads(biz.id, { source: 'whatsapp' });
+  const [wa] = await repo.listLeads(biz.id, { source: 'whatsapp' });
   assert.equal(wa.name, 'Marta');
   assert.equal(wa.phone, '+34622000111');
 });

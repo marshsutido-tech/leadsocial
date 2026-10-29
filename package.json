@@ -4,16 +4,17 @@
   "description": "Captación de leads desde Instagram, TikTok y WhatsApp para comercios",
   "main": "src/server.js",
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning src/server.js",
-    "dev": "node --watch --disable-warning=ExperimentalWarning src/server.js",
-    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.js\""
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test \"test/**/*.test.js\""
   },
   "license": "ISC",
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "express": "^5.1.0"
   },
   "engines": {
-    "node": ">=22.13"
+    "node": ">=20"
   },
   "private": true
 }

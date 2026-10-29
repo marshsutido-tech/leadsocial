@@ -19,11 +19,16 @@ Varios comercios pueden usar la misma instalación; cada uno solo ve sus leads.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/marshsutido-tech/leadsocial)
 
-Render lee `render.yaml` y crea el servicio (plan Starter), el disco para la base de datos y las variables necesarias.
+Todo gratis: la app en Render (plan Free) y los datos en [Turso](https://turso.tech) (plan gratuito).
+
+1. Crea una base de datos en Turso y copia su URL (`libsql://...`) y un token.
+2. Pulsa el botón de arriba y pega esos dos valores en `TURSO_DATABASE_URL` y `TURSO_AUTH_TOKEN`.
+
+En el plan Free, Render duerme la app tras 15 minutos sin visitas; la primera visita después tarda ~1 minuto en cargar.
 
 ## Puesta en marcha (local)
 
-Requisitos: Node.js ≥ 22.13 (usa el SQLite integrado de Node, sin dependencias nativas).
+Requisitos: Node.js ≥ 20. Sin variables de Turso usa un archivo SQLite local en `./data/leads.db`.
 
 ```bash
 npm install
@@ -48,7 +53,7 @@ TikTok no ofrece una API pública de DMs para comercios: se capta mediante el en
 
 ```
 src/server.js        rutas (público, acceso, panel)
-src/db.js            esquema SQLite y consultas
+src/db.js            esquema y consultas (SQLite local o Turso)
 src/auth.js          contraseñas (scrypt) y sesiones con cookie firmada
 src/integrations.js  webhooks de Meta (Instagram + WhatsApp)
 src/views.js         HTML del servidor
