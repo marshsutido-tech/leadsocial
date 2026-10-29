@@ -15,7 +15,13 @@ Cada comercio tiene:
 
 Varios comercios pueden usar la misma instalación; cada uno solo ve sus leads.
 
-## Puesta en marcha
+## Publicar en un clic
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/marshsutido-tech/leadsocial)
+
+Render lee `render.yaml` y crea el servicio (plan Starter), el disco para la base de datos y las variables necesarias.
+
+## Puesta en marcha (local)
 
 Requisitos: Node.js ≥ 22.13 (usa el SQLite integrado de Node, sin dependencias nativas).
 

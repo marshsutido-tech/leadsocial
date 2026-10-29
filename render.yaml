@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: leadsocial
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DB_FILE
+        value: /data/leads.db
+    disk:
+      name: datos
+      mountPath: /data
+      sizeGB: 1
